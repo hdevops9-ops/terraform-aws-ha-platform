@@ -1,0 +1,39 @@
+name: DevSecOps CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - name: Validate every root and module; execute behavior and plan-policy tests
+        run: bash scripts/checks.sh
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Secret detection
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.24.2 detect --source=/repo --no-git --redact --exit-code=1
+  iac-security:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block HIGH and CRITICAL IaC misconfigurations
+        run: docker run --rm -v "$PWD:/repo" aquasec/trivy:0.61.0 config --severity HIGH,CRITICAL --exit-code 1 /repo
+  workflow-syntax:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate CI and CD workflow syntax
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/deploy.yml

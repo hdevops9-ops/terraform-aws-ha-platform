@@ -1,0 +1,13 @@
+.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+*.auto.tfvars.json
+backend.hcl
+crash.log
+__pycache__/
+*.pyc
+!*.tfvars.example
+reviewed/
+reviewed-plan.txt
+deployment-outputs.json

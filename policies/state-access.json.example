@@ -1,0 +1,49 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListEnvironmentPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::REPLACE_STATE_BUCKET",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "production/terraform.tfstate",
+            "production/terraform.tfstate.tflock"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadWriteState",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::REPLACE_STATE_BUCKET/production/terraform.tfstate"
+    },
+    {
+      "Sid": "LockfileLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::REPLACE_STATE_BUCKET/production/terraform.tfstate.tflock"
+    },
+    {
+      "Sid": "StateKeyCryptography",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      "Resource": "arn:aws:kms:us-east-1:123456789012:key/REPLACE_STATE_KEY"
+    }
+  ]
+}

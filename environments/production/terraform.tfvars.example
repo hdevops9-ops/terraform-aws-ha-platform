@@ -1,0 +1,8 @@
+aws_account_id = "123456789012"
+region = "us-east-1"
+azs = ["us-east-1a","us-east-1b"]
+# Use an issued ACM certificate and a digest-pinned image compatible with uid 101, port 8080, and read-only root.
+image = "REPLACE_ECR_IMAGE@sha256:REPLACE_WITH_64_HEX_DIGEST"
+certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/REPLACE"
+log_bucket_name = "REPLACE-globally-unique-production-alb-logs"
+alarm_topic_arn = "arn:aws:sns:us-east-1:123456789012:REPLACE-alerts"

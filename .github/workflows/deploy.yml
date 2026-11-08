@@ -1,0 +1,124 @@
+name: Reviewed Terraform deployment
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Environment to deploy
+        type: choice
+        options: [dev, production]
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: terraform-${{ inputs.target }}
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.target }}-plan
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan_digest: ${{ steps.digest.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - name: Require deployment guard configuration
+        env:
+          CONFIRMED: ${{ vars.DEPLOYMENT_GUARDS_CONFIRMED }}
+        run: test "$CONFIRMED" = true
+      - name: Re-run contracts before authenticated planning
+        run: bash scripts/checks.sh
+      - name: IaC security gate
+        run: docker run --rm -v "$PWD:/repo" aquasec/trivy:0.61.0 config --severity HIGH,CRITICAL --exit-code 1 /repo
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: terraform-plan-${{ github.run_id }}
+      - name: Initialize remote state and create saved plan
+        env:
+          TARGET: ${{ inputs.target }}
+          STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+          STATE_KMS_KEY: ${{ vars.STATE_KMS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          DEPLOYMENT_INPUTS: ${{ vars.DEPLOYMENT_INPUTS_JSON }}
+        run: |
+          test -n "$STATE_BUCKET" && test -n "$STATE_KMS_KEY" && test -n "$DEPLOYMENT_INPUTS"
+          printf '%s' "$DEPLOYMENT_INPUTS" > "environments/$TARGET/ci.auto.tfvars.json"
+          terraform -chdir="environments/$TARGET" init -input=false -reconfigure -backend-config="bucket=$STATE_BUCKET" -backend-config="key=$TARGET/terraform.tfstate" -backend-config="region=$AWS_REGION" -backend-config="kms_key_id=$STATE_KMS_KEY" -backend-config=encrypt=true -backend-config=use_lockfile=true
+          terraform -chdir="environments/$TARGET" plan -input=false -lock-timeout=5m -out=saved.tfplan
+          terraform -chdir="environments/$TARGET" show -json saved.tfplan | python3 scripts/check_plan.py
+          terraform -chdir="environments/$TARGET" show -no-color saved.tfplan > reviewed-plan.txt
+      - name: Hash the exact saved plan
+        id: digest
+        env:
+          TARGET: ${{ inputs.target }}
+        run: echo "sha=$(sha256sum "environments/$TARGET/saved.tfplan" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-plan-${{ github.run_id }}
+          path: |
+            environments/${{ inputs.target }}/saved.tfplan
+            environments/${{ inputs.target }}/.terraform.lock.hcl
+            reviewed-plan.txt
+          include-hidden-files: true
+          retention-days: 1
+  apply:
+    needs: plan
+    runs-on: ubuntu-24.04
+    # Configure required reviewers and deployment-branch restrictions on these environments.
+    environment: ${{ inputs.target }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-plan-${{ github.run_id }}
+          path: reviewed
+      - name: Verify reviewed plan digest and provider lockfile
+        env:
+          TARGET: ${{ inputs.target }}
+          EXPECTED: ${{ needs.plan.outputs.plan_digest }}
+        run: |
+          echo "$EXPECTED  reviewed/environments/$TARGET/saved.tfplan" | sha256sum -c -
+          cp "reviewed/environments/$TARGET/.terraform.lock.hcl" "environments/$TARGET/.terraform.lock.hcl"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: terraform-apply-${{ github.run_id }}
+      - name: Require apply environment guard configuration
+        env:
+          CONFIRMED: ${{ vars.DEPLOYMENT_GUARDS_CONFIRMED }}
+        run: test "$CONFIRMED" = true
+      - name: Apply the approved binary plan without replanning
+        env:
+          TARGET: ${{ inputs.target }}
+          STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+          STATE_KMS_KEY: ${{ vars.STATE_KMS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          terraform -chdir="environments/$TARGET" init -input=false -reconfigure -lockfile=readonly -backend-config="bucket=$STATE_BUCKET" -backend-config="key=$TARGET/terraform.tfstate" -backend-config="region=$AWS_REGION" -backend-config="kms_key_id=$STATE_KMS_KEY" -backend-config=encrypt=true -backend-config=use_lockfile=true
+          terraform -chdir="environments/$TARGET" apply -input=false -lock-timeout=5m "../../reviewed/environments/$TARGET/saved.tfplan"
+          terraform -chdir="environments/$TARGET" output -json > deployment-outputs.json
+      - name: Wait for service health
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          cluster=$(terraform -chdir="environments/$TARGET" output -raw cluster_name)
+          service=$(terraform -chdir="environments/$TARGET" output -raw service_name)
+          aws ecs wait services-stable --cluster "$cluster" --services "$service"
